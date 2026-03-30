@@ -1,236 +1,145 @@
-import { useEffect } from "react";
-import { useFetcher } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
+import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
 
 export const loader = async ({ request }) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
 
-  return null;
-};
+  const totalRules = await prisma.discountRule.count({ where: { shop } });
+  const activeRules = await prisma.discountRule.count({
+    where: { shop, isActive: true },
+  });
+  const rules = await prisma.discountRule.findMany({
+    where: { shop },
+    orderBy: { createdAt: "desc" },
+    take: 5,
+  });
 
-export const action = async ({ request }) => {
-  const { admin } = await authenticate.admin(request);
-  const color = ["Red", "Orange", "Yellow", "Green"][
-    Math.floor(Math.random() * 4)
-  ];
-  const response = await admin.graphql(
-    `#graphql
-      mutation populateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
-            id
-            title
-            handle
-            status
-            variants(first: 10) {
-              edges {
-                node {
-                  id
-                  price
-                  barcode
-                  createdAt
-                }
-              }
-            }
-          }
-        }
-      }`,
-    {
-      variables: {
-        product: {
-          title: `${color} Snowboard`,
-        },
-      },
-    },
-  );
-  const responseJson = await response.json();
-  const product = responseJson.data.productCreate.product;
-  const variantId = product.variants.edges[0].node.id;
-  const variantResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-          price
-          barcode
-          createdAt
-        }
-      }
-    }`,
-    {
-      variables: {
-        productId: product.id,
-        variants: [{ id: variantId, price: "100.00" }],
-      },
-    },
-  );
-  const variantResponseJson = await variantResponse.json();
-
-  return {
-    product: responseJson.data.productCreate.product,
-    variant: variantResponseJson.data.productVariantsBulkUpdate.productVariants,
-  };
+  return { totalRules, activeRules, rules };
 };
 
 export default function Index() {
-  const fetcher = useFetcher();
-  const shopify = useAppBridge();
-  const isLoading =
-    ["loading", "submitting"].includes(fetcher.state) &&
-    fetcher.formMethod === "POST";
-
-  useEffect(() => {
-    if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
-    }
-  }, [fetcher.data?.product?.id, shopify]);
-  const generateProduct = () => fetcher.submit({}, { method: "POST" });
+  const { totalRules, activeRules, rules } = useLoaderData();
 
   return (
-    <s-page heading="Shopify app template">
-      <s-button slot="primary-action" onClick={generateProduct}>
-        Generate a product
+    <s-page heading="Cart Transform Dashboard">
+      <s-button slot="primary-action" href="/app/discount-rules">
+        Manage Rules
       </s-button>
 
-      <s-section heading="Congrats on creating a new Shopify app 🎉">
-        <s-paragraph>
-          This embedded app template uses{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
-          >
-            App Bridge
-          </s-link>{" "}
-          interface examples like an{" "}
-          <s-link href="/app/additional">additional page in the app nav</s-link>
-          , as well as an{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            Admin GraphQL
-          </s-link>{" "}
-          mutation demo, to provide a starting point for app development.
-        </s-paragraph>
-      </s-section>
-      <s-section heading="Get started with products">
-        <s-paragraph>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-          >
-            productCreate
-          </s-link>{" "}
-          mutation in our API references.
-        </s-paragraph>
+      <s-section heading="Overview">
         <s-stack direction="inline" gap="base">
-          <s-button
-            onClick={generateProduct}
-            {...(isLoading ? { loading: true } : {})}
-          >
-            Generate a product
-          </s-button>
-          {fetcher.data?.product && (
-            <s-button
-              onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
-                  value: fetcher.data?.product?.id,
-                });
-              }}
-              target="_blank"
-              variant="tertiary"
-            >
-              Edit product
-            </s-button>
-          )}
-        </s-stack>
-        {fetcher.data?.product && (
-          <s-section heading="productCreate mutation">
-            <s-stack direction="block" gap="base">
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.product, null, 2)}</code>
-                </pre>
-              </s-box>
-
-              <s-heading>productVariantsBulkUpdate mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.variant, null, 2)}</code>
-                </pre>
-              </s-box>
+          <s-box padding="base" borderWidth="base" borderRadius="base">
+            <s-stack direction="block" gap="tight">
+              <s-text variant="subdued">Total Rules</s-text>
+              <s-text fontWeight="bold" fontSize="large">
+                {totalRules}
+              </s-text>
             </s-stack>
-          </s-section>
-        )}
+          </s-box>
+          <s-box padding="base" borderWidth="base" borderRadius="base">
+            <s-stack direction="block" gap="tight">
+              <s-text variant="subdued">Active Rules</s-text>
+              <s-text fontWeight="bold" fontSize="large">
+                {activeRules}
+              </s-text>
+            </s-stack>
+          </s-box>
+          <s-box padding="base" borderWidth="base" borderRadius="base">
+            <s-stack direction="block" gap="tight">
+              <s-text variant="subdued">Inactive Rules</s-text>
+              <s-text fontWeight="bold" fontSize="large">
+                {totalRules - activeRules}
+              </s-text>
+            </s-stack>
+          </s-box>
+        </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="App template specs">
-        <s-paragraph>
-          <s-text>Framework: </s-text>
-          <s-link href="https://reactrouter.com/" target="_blank">
-            React Router
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Interface: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/app-home/using-polaris-components"
-            target="_blank"
-          >
-            Polaris web components
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>API: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            GraphQL
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Database: </s-text>
-          <s-link href="https://www.prisma.io/" target="_blank">
-            Prisma
-          </s-link>
-        </s-paragraph>
+      {rules.length > 0 && (
+        <s-section heading="Recent Rules">
+          <s-stack direction="block" gap="base">
+            {rules.map((rule) => (
+              <s-box
+                key={rule.id}
+                padding="base"
+                borderWidth="base"
+                borderRadius="base"
+                background={rule.isActive ? "surface" : "subdued"}
+              >
+                <s-stack direction="inline" gap="base" align="center">
+                  <s-stack direction="block" gap="tight" style={{ flex: 1 }}>
+                    <s-text fontWeight="bold">
+                      {rule.title || rule.utmSource}
+                    </s-text>
+                    <s-text variant="subdued">
+                      utm_source={rule.utmSource} →{" "}
+                      {rule.discountType === "percentage"
+                        ? `${rule.discountValue}% off`
+                        : `$${rule.discountValue} off`}
+                    </s-text>
+                  </s-stack>
+                  <s-badge tone={rule.isActive ? "success" : "default"}>
+                    {rule.isActive ? "Active" : "Inactive"}
+                  </s-badge>
+                </s-stack>
+              </s-box>
+            ))}
+          </s-stack>
+        </s-section>
+      )}
+
+      {rules.length === 0 && (
+        <s-section>
+          <s-empty-state heading="Welcome to Cart Transform">
+            <s-paragraph>
+              Create UTM-based discount rules to dynamically adjust prices for
+              visitors from different traffic sources. No product duplication, no
+              frontend flicker — prices are transformed server-side before
+              checkout.
+            </s-paragraph>
+            <s-button href="/app/discount-rules" variant="primary">
+              Create your first rule
+            </s-button>
+          </s-empty-state>
+        </s-section>
+      )}
+
+      <s-section slot="aside" heading="How Cart Transform Works">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            <s-text fontWeight="bold">1.</s-text> A visitor arrives at your
+            store with a UTM parameter (e.g. ?utm_source=instagram).
+          </s-paragraph>
+          <s-paragraph>
+            <s-text fontWeight="bold">2.</s-text> The theme snippet captures
+            the UTM source and saves it as a cart attribute.
+          </s-paragraph>
+          <s-paragraph>
+            <s-text fontWeight="bold">3.</s-text> At checkout, the Shopify
+            Function reads the cart attribute and your discount rules.
+          </s-paragraph>
+          <s-paragraph>
+            <s-text fontWeight="bold">4.</s-text> Matching prices are
+            transformed instantly — no flicker, no product duplication.
+          </s-paragraph>
+        </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="Next steps">
+      <s-section slot="aside" heading="Quick Setup">
         <s-unordered-list>
           <s-list-item>
-            Build an{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/getting-started/build-app-example"
-              target="_blank"
-            >
-              example app
-            </s-link>
+            <s-link href="/app/discount-rules">Create discount rules</s-link>{" "}
+            for your UTM sources
           </s-list-item>
           <s-list-item>
-            Explore Shopify&apos;s API with{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/tools/graphiql-admin-api"
-              target="_blank"
-            >
-              GraphiQL
-            </s-link>
+            Add the theme snippet (see Discount Rules page)
+          </s-list-item>
+          <s-list-item>
+            Enable the Cart Transform in Shopify Admin → Settings → Cart
+            Transforms
           </s-list-item>
         </s-unordered-list>
       </s-section>

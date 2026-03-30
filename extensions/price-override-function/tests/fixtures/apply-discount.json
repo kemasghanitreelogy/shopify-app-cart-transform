@@ -4,11 +4,13 @@
     "target": "cart.transform.run",
     "input": {
       "cart": {
-        "attribute": null,
+        "attribute": {
+          "value": "instagram"
+        },
         "lines": [
           {
             "id": "gid://shopify/CartLine/1",
-            "quantity": 1,
+            "quantity": 2,
             "cost": {
               "amountPerQuantity": {
                 "amount": "100.00",
@@ -26,11 +28,27 @@
         ]
       },
       "cartTransform": {
-        "metafield": null
+        "metafield": {
+          "value": "[{\"utmSource\":\"instagram\",\"discountType\":\"percentage\",\"discountValue\":10,\"isActive\":true,\"title\":\"Instagram 10% Off\"}]"
+        }
       }
     },
     "output": {
-      "operations": []
+      "operations": [
+        {
+          "update": {
+            "cartLineId": "gid://shopify/CartLine/1",
+            "title": "Instagram 10% Off",
+            "price": {
+              "adjustment": {
+                "fixedPricePerUnit": {
+                  "amount": "90"
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

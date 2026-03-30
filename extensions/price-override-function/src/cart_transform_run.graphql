@@ -1,8 +1,30 @@
 query CartTransformRunInput {
   cart {
+    attribute(key: "utm_source") {
+      value
+    }
     lines {
       id
       quantity
+      cost {
+        amountPerQuantity {
+          amount
+          currencyCode
+        }
+      }
+      merchandise {
+        ... on ProductVariant {
+          id
+          product {
+            id
+          }
+        }
+      }
+    }
+  }
+  cartTransform {
+    metafield(namespace: "cart-transform", key: "discount-rules") {
+      value
     }
   }
 }

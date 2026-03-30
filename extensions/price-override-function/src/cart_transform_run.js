@@ -17,5 +17,72 @@ const NO_CHANGES = {
  * @returns {CartTransformRunResult}
  */
 export function cartTransformRun(input) {
-  return NO_CHANGES;
-};
+  const utmSource = input.cart.attribute?.value;
+
+  if (!utmSource) {
+    return NO_CHANGES;
+  }
+
+  const metafieldValue = input.cartTransform?.metafield?.value;
+
+  if (!metafieldValue) {
+    return NO_CHANGES;
+  }
+
+  let rules;
+  try {
+    rules = JSON.parse(metafieldValue);
+  } catch {
+    return NO_CHANGES;
+  }
+
+  // Find active rule matching this utm_source
+  const matchingRule = rules.find(
+    (rule) => rule.utmSource === utmSource && rule.isActive
+  );
+
+  if (!matchingRule) {
+    return NO_CHANGES;
+  }
+
+  const operations = [];
+
+  for (const line of input.cart.lines) {
+    const originalPrice = parseFloat(line.cost.amountPerQuantity.amount);
+
+    let newPrice;
+    if (matchingRule.discountType === "percentage") {
+      newPrice = originalPrice * (1 - matchingRule.discountValue / 100);
+    } else {
+      // fixed amount discount
+      newPrice = Math.max(0, originalPrice - matchingRule.discountValue);
+    }
+
+    // Round to 2 decimal places
+    newPrice = Math.round(newPrice * 100) / 100;
+
+    if (newPrice < originalPrice) {
+      operations.push({
+        update: {
+          cartLineId: line.id,
+          title: matchingRule.title
+            ? `${matchingRule.title}`
+            : undefined,
+          price: {
+            adjustment: {
+              fixedPricePerUnit: {
+                amount: newPrice.toString(),
+              },
+            },
+          },
+        },
+      });
+    }
+  }
+
+  if (operations.length === 0) {
+    return NO_CHANGES;
+  }
+
+  return { operations };
+}
