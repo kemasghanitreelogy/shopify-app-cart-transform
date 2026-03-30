@@ -5,6 +5,90 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
+// Get or create the cart transform instance
+async function getOrCreateCartTransform(admin) {
+  // Check for existing cart transforms
+  const cartTransformResponse = await admin.graphql(
+    `#graphql
+      query {
+        cartTransforms(first: 10) {
+          nodes {
+            id
+            functionId
+            metafield(namespace: "cart-transform", key: "discount-rules") {
+              value
+            }
+          }
+        }
+      }`
+  );
+
+  const cartTransformData = await cartTransformResponse.json();
+  const existing = cartTransformData.data?.cartTransforms?.nodes?.[0];
+
+  if (existing) {
+    return existing;
+  }
+
+  // No cart transform exists — find our function ID and create one
+  const appResponse = await admin.graphql(
+    `#graphql
+      query {
+        shopifyFunctions(first: 25) {
+          nodes {
+            id
+            title
+            apiType
+            app {
+              title
+            }
+          }
+        }
+      }`
+  );
+
+  const appData = await appResponse.json();
+  const cartTransformFunction = appData.data?.shopifyFunctions?.nodes?.find(
+    (fn) => fn.apiType === "cart_transform"
+  );
+
+  if (!cartTransformFunction) {
+    return { error: "Cart transform function not found. Make sure the extension is deployed." };
+  }
+
+  // Create the cart transform
+  const createResponse = await admin.graphql(
+    `#graphql
+      mutation CartTransformCreate($functionId: String!) {
+        cartTransformCreate(functionId: $functionId) {
+          cartTransform {
+            id
+            functionId
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+    {
+      variables: {
+        functionId: cartTransformFunction.id,
+      },
+    }
+  );
+
+  const createData = await createResponse.json();
+  const created = createData.data?.cartTransformCreate?.cartTransform;
+
+  if (!created) {
+    const errors = createData.data?.cartTransformCreate?.userErrors;
+    return { error: errors?.map((e) => e.message).join(", ") || "Failed to create cart transform." };
+  }
+
+  return created;
+}
+
 // Sync discount rules to the cart transform metafield
 async function syncRulesToMetafield(admin, shop) {
   const rules = await prisma.discountRule.findMany({
@@ -25,26 +109,10 @@ async function syncRulesToMetafield(admin, shop) {
     productIds: JSON.parse(rule.productIds || "[]"),
   }));
 
-  const cartTransformResponse = await admin.graphql(
-    `#graphql
-      query {
-        cartTransforms(first: 10) {
-          nodes {
-            id
-            functionId
-            metafield(namespace: "cart-transform", key: "discount-rules") {
-              value
-            }
-          }
-        }
-      }`
-  );
+  const cartTransform = await getOrCreateCartTransform(admin);
 
-  const cartTransformData = await cartTransformResponse.json();
-  const cartTransform = cartTransformData.data?.cartTransforms?.nodes?.[0];
-
-  if (!cartTransform) {
-    return { error: "No cart transform found. Please create one first via the Shopify admin." };
+  if (cartTransform.error) {
+    return cartTransform;
   }
 
   const metafieldResponse = await admin.graphql(
@@ -125,7 +193,13 @@ export const loader = async ({ request }) => {
     }
   }
 
-  return { rules, shop, productMap };
+  // Check cart transform status
+  const cartTransform = await getOrCreateCartTransform(admin);
+  const cartTransformStatus = cartTransform.error
+    ? { active: false, error: cartTransform.error }
+    : { active: true, id: cartTransform.id };
+
+  return { rules, shop, productMap, cartTransformStatus };
 };
 
 export const action = async ({ request }) => {
@@ -198,7 +272,7 @@ export const action = async ({ request }) => {
 };
 
 export default function DiscountRules() {
-  const { rules, productMap } = useLoaderData();
+  const { rules, productMap, cartTransformStatus } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -299,6 +373,17 @@ export default function DiscountRules() {
       >
         Sync to Shopify
       </s-button>
+
+      {cartTransformStatus?.active ? (
+        <s-banner tone="success" dismissible>
+          Cart Transform is active and ready to apply discounts.
+        </s-banner>
+      ) : (
+        <s-banner tone="critical">
+          Cart Transform is not active: {cartTransformStatus?.error || "Unknown error"}.
+          Click "Sync to Shopify" to set it up.
+        </s-banner>
+      )}
 
       {showForm && (
         <s-section heading="New Discount Rule">
