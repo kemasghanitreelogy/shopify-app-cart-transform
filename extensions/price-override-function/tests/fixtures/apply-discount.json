@@ -36,7 +36,7 @@
     "output": {
       "operations": [
         {
-          "update": {
+          "lineUpdate": {
             "cartLineId": "gid://shopify/CartLine/1",
             "title": "Instagram 10% Off",
             "price": {

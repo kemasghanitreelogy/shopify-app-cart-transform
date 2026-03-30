@@ -37,17 +37,33 @@ export function cartTransformRun(input) {
   }
 
   // Find active rule matching this utm_source
+  /** @type {{ utmSource: string, discountType: string, discountValue: number, isActive: boolean, title: string, productIds: string[] } | undefined} */
   const matchingRule = rules.find(
-    (rule) => rule.utmSource === utmSource && rule.isActive
+    (/** @type {any} */ rule) => rule.utmSource === utmSource && rule.isActive
   );
 
   if (!matchingRule) {
     return NO_CHANGES;
   }
 
+  const targetProductIds = matchingRule.productIds || [];
+  const hasProductFilter = targetProductIds.length > 0;
+
   const operations = [];
 
   for (const line of input.cart.lines) {
+    // If rule targets specific products, check if this line's product matches
+    if (hasProductFilter) {
+      const merchandise = line.merchandise;
+      if (!merchandise || !("product" in merchandise)) {
+        continue;
+      }
+      const productId = merchandise.product?.id;
+      if (!productId || !targetProductIds.includes(productId)) {
+        continue;
+      }
+    }
+
     const originalPrice = parseFloat(line.cost.amountPerQuantity.amount);
 
     let newPrice;
@@ -63,11 +79,9 @@ export function cartTransformRun(input) {
 
     if (newPrice < originalPrice) {
       operations.push({
-        update: {
+        lineUpdate: {
           cartLineId: line.id,
-          title: matchingRule.title
-            ? `${matchingRule.title}`
-            : undefined,
+          title: matchingRule.title || undefined,
           price: {
             adjustment: {
               fixedPricePerUnit: {

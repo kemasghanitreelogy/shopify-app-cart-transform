@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -15,10 +15,16 @@ async function syncRulesToMetafield(admin, shop) {
       discountValue: true,
       isActive: true,
       title: true,
+      productIds: true,
     },
   });
 
-  // First, get the cart transform function ID
+  // Parse productIds from JSON string for the metafield
+  const rulesForMetafield = rules.map((rule) => ({
+    ...rule,
+    productIds: JSON.parse(rule.productIds || "[]"),
+  }));
+
   const cartTransformResponse = await admin.graphql(
     `#graphql
       query {
@@ -41,10 +47,9 @@ async function syncRulesToMetafield(admin, shop) {
     return { error: "No cart transform found. Please create one first via the Shopify admin." };
   }
 
-  // Update the metafield on the cart transform
   const metafieldResponse = await admin.graphql(
     `#graphql
-      mutation UpdateCartTransformMetafield($id: ID!, $metafields: [MetafieldsSetInput!]!) {
+      mutation UpdateCartTransformMetafield($metafields: [MetafieldsSetInput!]!) {
         metafieldsSet(metafields: $metafields) {
           metafields {
             id
@@ -60,14 +65,13 @@ async function syncRulesToMetafield(admin, shop) {
       }`,
     {
       variables: {
-        id: cartTransform.id,
         metafields: [
           {
             ownerId: cartTransform.id,
             namespace: "cart-transform",
             key: "discount-rules",
             type: "json",
-            value: JSON.stringify(rules),
+            value: JSON.stringify(rulesForMetafield),
           },
         ],
       },
@@ -79,7 +83,7 @@ async function syncRulesToMetafield(admin, shop) {
 }
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
 
   const rules = await prisma.discountRule.findMany({
@@ -87,7 +91,41 @@ export const loader = async ({ request }) => {
     orderBy: { createdAt: "desc" },
   });
 
-  return { rules, shop };
+  // Collect all product IDs to fetch their titles
+  const allProductIds = [];
+  for (const rule of rules) {
+    const ids = JSON.parse(rule.productIds || "[]");
+    for (const id of ids) {
+      if (!allProductIds.includes(id)) {
+        allProductIds.push(id);
+      }
+    }
+  }
+
+  // Fetch product titles for display
+  let productMap = {};
+  if (allProductIds.length > 0) {
+    const productResponse = await admin.graphql(
+      `#graphql
+        query GetProducts($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Product {
+              id
+              title
+            }
+          }
+        }`,
+      { variables: { ids: allProductIds } }
+    );
+    const productData = await productResponse.json();
+    for (const node of productData.data?.nodes || []) {
+      if (node?.id && node?.title) {
+        productMap[node.id] = node.title;
+      }
+    }
+  }
+
+  return { rules, shop, productMap };
 };
 
 export const action = async ({ request }) => {
@@ -102,6 +140,7 @@ export const action = async ({ request }) => {
       const discountType = formData.get("discountType")?.toString() || "percentage";
       const discountValue = parseFloat(formData.get("discountValue")?.toString() || "0");
       const title = formData.get("title")?.toString().trim() || "";
+      const productIds = formData.get("productIds")?.toString() || "[]";
 
       if (!utmSource || discountValue <= 0) {
         return { error: "UTM Source and a positive discount value are required." };
@@ -113,8 +152,8 @@ export const action = async ({ request }) => {
 
       await prisma.discountRule.upsert({
         where: { shop_utmSource: { shop, utmSource } },
-        update: { discountType, discountValue, title, isActive: true },
-        create: { shop, utmSource, discountType, discountValue, title },
+        update: { discountType, discountValue, title, productIds, isActive: true },
+        create: { shop, utmSource, discountType, discountValue, title, productIds },
       });
 
       await syncRulesToMetafield(admin, shop);
@@ -137,9 +176,7 @@ export const action = async ({ request }) => {
     if (intent === "delete") {
       const id = formData.get("id")?.toString();
 
-      await prisma.discountRule.delete({
-        where: { id },
-      });
+      await prisma.discountRule.delete({ where: { id } });
 
       await syncRulesToMetafield(admin, shop);
       return { success: true, message: "Rule deleted." };
@@ -161,7 +198,7 @@ export const action = async ({ request }) => {
 };
 
 export default function DiscountRules() {
-  const { rules } = useLoaderData();
+  const { rules, productMap } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -170,8 +207,20 @@ export default function DiscountRules() {
   const [discountType, setDiscountType] = useState("percentage");
   const [discountValue, setDiscountValue] = useState("");
   const [title, setTitle] = useState("");
+  const [selectedProducts, setSelectedProducts] = useState([]);
+
+  const selectRef = useRef(null);
 
   const isSubmitting = fetcher.state !== "idle";
+
+  // Attach native change listener for s-select
+  useEffect(() => {
+    const el = selectRef.current;
+    if (!el) return;
+    const handler = (e) => setDiscountType(e.target.value);
+    el.addEventListener("change", handler);
+    return () => el.removeEventListener("change", handler);
+  }, [showForm]);
 
   useEffect(() => {
     if (fetcher.data?.success) {
@@ -181,15 +230,35 @@ export default function DiscountRules() {
       setDiscountType("percentage");
       setDiscountValue("");
       setTitle("");
+      setSelectedProducts([]);
     }
     if (fetcher.data?.error) {
       shopify.toast.show(fetcher.data.error, { isError: true });
     }
   }, [fetcher.data, shopify]);
 
+  const handleSelectProducts = useCallback(async () => {
+    const selected = await shopify.resourcePicker({
+      type: "product",
+      multiple: true,
+      selectionIds: selectedProducts.map((p) => ({ id: p.id })),
+    });
+
+    if (selected) {
+      setSelectedProducts(
+        selected.map((p) => ({ id: p.id, title: p.title }))
+      );
+    }
+  }, [shopify, selectedProducts]);
+
+  const handleRemoveProduct = (productId) => {
+    setSelectedProducts((prev) => prev.filter((p) => p.id !== productId));
+  };
+
   const handleCreate = () => {
+    const productIds = JSON.stringify(selectedProducts.map((p) => p.id));
     fetcher.submit(
-      { intent: "create", utmSource, discountType, discountValue, title },
+      { intent: "create", utmSource, discountType, discountValue, title, productIds },
       { method: "POST" }
     );
   };
@@ -212,6 +281,12 @@ export default function DiscountRules() {
     fetcher.submit({ intent: "sync" }, { method: "POST" });
   };
 
+  const getProductNames = (rule) => {
+    const ids = JSON.parse(rule.productIds || "[]");
+    if (ids.length === 0) return "All products";
+    return ids.map((id) => productMap[id] || id.split("/").pop()).join(", ");
+  };
+
   return (
     <s-page heading="UTM Discount Rules">
       <s-button slot="primary-action" onClick={() => setShowForm(!showForm)}>
@@ -228,37 +303,79 @@ export default function DiscountRules() {
       {showForm && (
         <s-section heading="New Discount Rule">
           <s-stack direction="block" gap="base">
+            <s-text-field
+              label="Rule Title"
+              value={title}
+              onInput={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Instagram Promo 10%"
+            />
+            <s-text-field
+              label="UTM Source"
+              value={utmSource}
+              onInput={(e) => setUtmSource(e.target.value)}
+              placeholder="e.g. instagram, tiktok, facebook"
+            />
             <s-stack direction="inline" gap="base">
-              <s-text-field
-                label="Rule Title"
-                value={title}
-                onInput={(e) => setTitle(e.target.value)}
-                placeholder="e.g. Instagram Promo 10%"
-              />
+              <div style={{ flex: 1 }}>
+                <s-select
+                  ref={selectRef}
+                  label="Discount Type"
+                  value={discountType}
+                  options={JSON.stringify([
+                    { label: "Percentage (%)", value: "percentage" },
+                    { label: "Fixed Amount", value: "fixed" },
+                  ])}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <s-text-field
+                  label={discountType === "percentage" ? "Discount (%)" : "Discount Amount"}
+                  type="number"
+                  value={discountValue}
+                  onInput={(e) => setDiscountValue(e.target.value)}
+                  placeholder={discountType === "percentage" ? "e.g. 10" : "e.g. 5.00"}
+                />
+              </div>
             </s-stack>
-            <s-stack direction="inline" gap="base">
-              <s-text-field
-                label="UTM Source"
-                value={utmSource}
-                onInput={(e) => setUtmSource(e.target.value)}
-                placeholder="e.g. instagram, tiktok, facebook"
-              />
-              <s-select
-                label="Discount Type"
-                value={discountType}
-                onChange={(e) => setDiscountType(e.target.value)}
-              >
-                <option value="percentage">Percentage (%)</option>
-                <option value="fixed">Fixed Amount</option>
-              </s-select>
-              <s-text-field
-                label={discountType === "percentage" ? "Discount (%)" : "Discount Amount"}
-                type="number"
-                value={discountValue}
-                onInput={(e) => setDiscountValue(e.target.value)}
-                placeholder={discountType === "percentage" ? "e.g. 10" : "e.g. 5.00"}
-              />
+
+            <s-stack direction="block" gap="tight">
+              <s-text fontWeight="bold">Target Products</s-text>
+              <s-paragraph>
+                <s-text variant="subdued">
+                  Select specific products, or leave empty to apply to all products.
+                </s-text>
+              </s-paragraph>
+              <s-button variant="secondary" onClick={handleSelectProducts}>
+                {selectedProducts.length > 0
+                  ? `${selectedProducts.length} product(s) selected — Change`
+                  : "Select Products"}
+              </s-button>
+              {selectedProducts.length > 0 && (
+                <s-stack direction="block" gap="tight">
+                  {selectedProducts.map((product) => (
+                    <s-box
+                      key={product.id}
+                      padding="tight"
+                      borderWidth="base"
+                      borderRadius="base"
+                    >
+                      <s-stack direction="inline" gap="tight" align="center">
+                        <s-text style={{ flex: 1 }}>{product.title}</s-text>
+                        <s-button
+                          variant="tertiary"
+                          tone="critical"
+                          size="slim"
+                          onClick={() => handleRemoveProduct(product.id)}
+                        >
+                          Remove
+                        </s-button>
+                      </s-stack>
+                    </s-box>
+                  ))}
+                </s-stack>
+              )}
             </s-stack>
+
             <s-button
               variant="primary"
               onClick={handleCreate}
@@ -299,6 +416,9 @@ export default function DiscountRules() {
                         ? `${rule.discountValue}% off`
                         : `$${rule.discountValue} off`}
                     </s-text>
+                    <s-text variant="subdued">
+                      Products: {getProductNames(rule)}
+                    </s-text>
                     <s-badge tone={rule.isActive ? "success" : "default"}>
                       {rule.isActive ? "Active" : "Inactive"}
                     </s-badge>
@@ -329,7 +449,7 @@ export default function DiscountRules() {
         <s-stack direction="block" gap="base">
           <s-paragraph>
             <s-text fontWeight="bold">1. Create rules</s-text> — Define which
-            UTM sources get discounts and how much.
+            UTM sources get discounts, how much, and for which products.
           </s-paragraph>
           <s-paragraph>
             <s-text fontWeight="bold">2. Capture UTM</s-text> — Add a snippet
