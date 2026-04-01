@@ -37,11 +37,9 @@ model DiscountRule {
   id            String   @id @default(uuid())
   shop          String
   utmSource     String
-  discountType  String   @default("percentage") // "percentage" or "fixed"
-  discountValue Float
+  discountCode  String   // Native Shopify discount code
+  discountTitle String   @default("") // Display name from Shopify
   isActive      Boolean  @default(true)
-  title         String   @default("")
-  productIds    String   @default("[]") // JSON array of product GIDs, empty array = all products
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
